@@ -1,2 +1,2 @@
 # Neo4j-GraphRag
-[Alt Text]()
+[Alt Text](images/ccc-1.png)
