@@ -1,21 +1,25 @@
 """
-graph.py — LangGraph pipeline.
+graph.py — LangGraph pipeline with parallel retrievers.
 
     User Query
-        ├──► [ Vector Retriever ] ──► Ranked List A (IDs)
-        └──► [ Graph Traversal ]  ──► Ranked List B (IDs)
-                    │
-                    ▼
-        [ RRF ] ──► [ Expanded Pool ]
-                    │
-                    ▼
-        [ Fetch Content Storage ]
-                    │
-                    ▼
-        [ Cross-Encoder Reranker ] ──► [ Final Top-K ]
-                    │
-                    ▼
-        [ LLM Generation ]
+        ├──► [ vector_retriever ] ──► list_a_ids ──┐
+        └──► [ graph_traversal  ] ──► list_b_ids ──┤
+                                                    │
+                                                    ▼
+                                                  [ rrf ]
+                                                    │
+                                                    ▼
+                                          [ fetch_content ]
+                                                    │
+                                                    ▼
+                                                [ rerank ]
+                                                    │
+                                                    ▼
+                                                [ generate ]
+
+The two retrievers run in the same LangGraph superstep.
+graph_traversal uses full-text search on the question as its seed
+source, so it does not depend on vector_retriever's output.
 """
 
 import os
@@ -30,7 +34,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_classic.retrievers.document_compressors import CrossEncoderReranker
 from langchain_community.cross_encoders import HuggingFaceCrossEncoder
-from langgraph.graph import StateGraph, END
+from langgraph.graph import StateGraph, START, END
 
 load_dotenv(override=True)
 logging.getLogger("neo4j").setLevel(logging.CRITICAL)
@@ -47,6 +51,9 @@ FINAL_K = 5
 RRF_K = 60
 
 
+# ═══════════════════════════════════════════════════════════════
+# State
+# ═══════════════════════════════════════════════════════════════
 class State(TypedDict):
     question: str
     list_a_ids: list
@@ -59,6 +66,9 @@ class State(TypedDict):
     error: str
 
 
+# ═══════════════════════════════════════════════════════════════
+# Storage
+# ═══════════════════════════════════════════════════════════════
 vector_store = Neo4jVector.from_existing_index(
     embedding=OpenAIEmbeddings(),
     url=URI, username=USER, password=PWD, database=DB,
@@ -72,11 +82,26 @@ graph = Neo4jGraph(
 )
 
 
+# ═══════════════════════════════════════════════════════════════
+# [ Vector Retriever ] → list_a_ids
+# ═══════════════════════════════════════════════════════════════
 def vector_retriever(state: State) -> State:
     docs = vector_store.similarity_search(state["question"], k=VECTOR_K)
     state["list_a_ids"] = [d.page_content for d in docs]
     return state
 
+
+# ═══════════════════════════════════════════════════════════════
+# [ Graph Traversal ] → list_b_ids
+#
+# Uses full-text search on the question for its seeds.
+# Does NOT depend on vector_retriever's output.
+# ═══════════════════════════════════════════════════════════════
+FULLTEXT_SEEDS = """
+CALL db.index.fulltext.queryNodes('ft_article', $q, {limit: 3})
+YIELD node, score
+RETURN node.title AS title
+"""
 
 GRAPH_TRAVERSAL = """
 UNWIND $titles AS t
@@ -91,15 +116,31 @@ RETURN neighbor.title AS title
 
 
 def graph_traversal(state: State) -> State:
-    seeds = state.get("list_a_ids", [])[:3]
+    question = state["question"]
+
+    # Independent seed source: full-text search on the question
+    try:
+        seed_rows = graph.query(FULLTEXT_SEEDS, params={"q": question})
+        seeds = [r["title"] for r in seed_rows]
+    except Exception as e:
+        logging.warning(f"fulltext seed search failed: {e}")
+        seeds = []
+
     if not seeds:
         state["list_b_ids"] = []
         return state
-    rows = graph.query(GRAPH_TRAVERSAL, params={"titles": seeds, "limit": GRAPH_K})
+
+    rows = graph.query(
+        GRAPH_TRAVERSAL,
+        params={"titles": seeds, "limit": GRAPH_K},
+    )
     state["list_b_ids"] = [r["title"] for r in rows]
     return state
 
 
+# ═══════════════════════════════════════════════════════════════
+# [ RRF ] → expanded_pool_ids
+# ═══════════════════════════════════════════════════════════════
 def rrf(state: State) -> State:
     scores: dict[str, float] = {}
     for ranking in (state.get("list_a_ids", []), state.get("list_b_ids", [])):
@@ -110,6 +151,9 @@ def rrf(state: State) -> State:
     return state
 
 
+# ═══════════════════════════════════════════════════════════════
+# [ Fetch Content Storage ] → docs
+# ═══════════════════════════════════════════════════════════════
 FETCH_CONTENT = """
 UNWIND $titles AS title
 MATCH (a:Article {title: title})
@@ -127,13 +171,18 @@ def fetch_content(state: State) -> State:
         return state
     rows = graph.query(FETCH_CONTENT, params={"titles": ids})
     state["docs"] = [
-        Document(page_content=r["title"],
-                 metadata={"authors": r["authors"], "topics": r["topics"]})
+        Document(
+            page_content=r["title"],
+            metadata={"authors": r["authors"], "topics": r["topics"]},
+        )
         for r in rows
     ]
     return state
 
 
+# ═══════════════════════════════════════════════════════════════
+# [ Cross-Encoder Reranker ] → final_docs, context
+# ═══════════════════════════════════════════════════════════════
 reranker = CrossEncoderReranker(
     model=HuggingFaceCrossEncoder(model_name="cross-encoder/ms-marco-MiniLM-L-6-v2"),
     top_n=FINAL_K,
@@ -155,6 +204,9 @@ def rerank(state: State) -> State:
     return state
 
 
+# ═══════════════════════════════════════════════════════════════
+# [ LLM Generation ] → answer
+# ═══════════════════════════════════════════════════════════════
 PROMPT = ChatPromptTemplate.from_template(
     "You are listing articles retrieved for a query.\n"
     "List EVERY row from the context, one per line.\n"
@@ -178,20 +230,26 @@ def generate(state: State) -> State:
     return state
 
 
+# ═══════════════════════════════════════════════════════════════
+# Graph with parallel fan-out and fan-in
+# ═══════════════════════════════════════════════════════════════
 wf = StateGraph(State)
-for name, fn in [
-    ("vector_retriever", vector_retriever),
-    ("graph_traversal", graph_traversal),
-    ("rrf", rrf),
-    ("fetch_content", fetch_content),
-    ("rerank", rerank),
-    ("generate", generate),
-]:
-    wf.add_node(name, fn)
+wf.add_node("vector_retriever", vector_retriever)
+wf.add_node("graph_traversal", graph_traversal)
+wf.add_node("rrf", rrf)
+wf.add_node("fetch_content", fetch_content)
+wf.add_node("rerank", rerank)
+wf.add_node("generate", generate)
 
-wf.set_entry_point("vector_retriever")
-wf.add_edge("vector_retriever", "graph_traversal")
+# Fan-out: both retrievers start at the same time
+wf.add_edge(START, "vector_retriever")
+wf.add_edge(START, "graph_traversal")
+
+# Fan-in: rrf waits for both to complete, then runs
+wf.add_edge("vector_retriever", "rrf")
 wf.add_edge("graph_traversal", "rrf")
+
+# Linear after rrf
 wf.add_edge("rrf", "fetch_content")
 wf.add_edge("fetch_content", "rerank")
 wf.add_edge("rerank", "generate")
