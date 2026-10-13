@@ -1,0 +1,95 @@
+services:
+  # ── Keycloak ────────────────────────────────────────────────
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: keycloak
+    command:
+      - start-dev
+      - --import-realm
+      - --http-port=8080
+      - --metrics-enabled=true
+      - --http-metrics-histograms-enabled=true
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HTTP_ENABLED: "true"
+      KC_HOSTNAME_STRICT: "false"
+    ports:
+      - "8080:8080"
+      - "9000:9000"
+    volumes:
+      - ./keycloak/realm.json:/opt/keycloak/data/import/realm.json:ro
+    networks:
+      - graphrag-net
+    restart: unless-stopped
+
+  # ── GraphRAG API ────────────────────────────────────────────
+  graphrag-api:
+    build: .
+    container_name: graphrag-api
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      - keycloak
+    networks:
+      - graphrag-net
+    restart: unless-stopped
+
+  # ── Frontend (nginx serving static files) ───────────────────
+  frontend:
+    image: nginx:alpine
+    container_name: frontend
+    ports:
+      - "3001:80"
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+    networks:
+      - graphrag-net
+    restart: unless-stopped
+
+  # ── Prometheus ──────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"
+    networks:
+      - graphrag-net
+    restart: unless-stopped
+
+  # ── Grafana ─────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - graphrag-net
+    restart: unless-stopped
+
+networks:
+  graphrag-net:
+    driver: bridge
+
+volumes:
+  prometheus-data:
+  grafana-data:

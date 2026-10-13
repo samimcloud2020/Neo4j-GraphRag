@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GraphRAG Chat</title>
+  <link rel="stylesheet" href="style.css" />
+
+  <!-- Keycloak 26 is ES-module only.
+       Load from the local file and expose as a global. -->
+  <script type="module">
+    import Keycloak from './keycloak.esm.js';
+    globalThis.Keycloak = Keycloak;
+    window.dispatchEvent(new Event('keycloak-ready'));
+  </script>
+</head>
+<body>
+  <header>
+    <h1>GraphRAG</h1>
+    <div id="user-info">
+      <span id="username">loading…</span>
+      <button id="login-btn" disabled>Login</button>
+      <button id="logout-btn" hidden>Logout</button>
+    </div>
+  </header>
+
+  <main>
+    <div id="messages">
+      <div class="msg bot">
+        Sign in to start asking questions about articles, authors, and topics.
+      </div>
+    </div>
+    <form id="ask-form">
+      <input id="question" type="text"
+             placeholder="Ask about articles, authors, or topics..."
+             autocomplete="off" disabled />
+      <button type="submit" id="send-btn" disabled>Send</button>
+    </form>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

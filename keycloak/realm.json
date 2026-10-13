@@ -1,0 +1,74 @@
+{
+  "realm": "graphrag",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "accessTokenLifespan": 1800,
+  "roles": {
+    "realm": [
+      {"name": "graphrag-user", "description": "Can ask questions"},
+      {"name": "graphrag-admin", "description": "Full access"}
+    ]
+  },
+  "clients": [{
+    "clientId": "graphrag-api",
+    "enabled": true,
+    "publicClient": false,
+    "secret": "amaVYNTju5lYzeXAk2OQEJ3ovLOkGH7J",
+    "clientAuthenticatorType": "client-secret",
+    "standardFlowEnabled": true,
+    "directAccessGrantsEnabled": true,
+    "protocol": "openid-connect",
+    "redirectUris": ["http://localhost:8000/*", "http://localhost:3001/*"],
+    "webOrigins": ["http://localhost:8000", "http://localhost:3001"],
+    "protocolMappers": [
+      {
+        "name": "realm-roles",
+        "protocol": "openid-connect",
+        "protocolMapper": "oidc-usermodel-realm-role-mapper",
+        "config": {
+          "multivalued": "true",
+          "access.token.claim": "true",
+          "id.token.claim": "true",
+          "claim.name": "realm_access.roles",
+          "jsonType.label": "String"
+        }
+      },
+      {
+        "name": "audience-mapper",
+        "protocol": "openid-connect",
+        "protocolMapper": "oidc-audience-mapper",
+        "config": {
+          "included.client.audience": "graphrag-api",
+          "access.token.claim": "true"
+        }
+      }
+    ]
+  }],
+  "users": [
+    {
+      "username": "alice",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "alice@example.com",
+      "firstName": "Alice",
+      "lastName": "Smith",
+      "requiredActions": [],
+      "credentials": [{"type": "password", "value": "alice-pass", "temporary": false}],
+      "realmRoles": ["graphrag-user"]
+    },
+    {
+      "username": "admin",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "admin@example.com",
+      "firstName": "Admin",
+      "lastName": "User",
+      "requiredActions": [],
+      "credentials": [{"type": "password", "value": "admin-pass", "temporary": false}],
+      "realmRoles": ["graphrag-admin", "graphrag-user"]
+    }
+  ]
+}
